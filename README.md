@@ -1,1 +1,0 @@
-# dtek-light-bot
