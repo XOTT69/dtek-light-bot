@@ -1,200 +1,153 @@
 const TelegramBot = require('node-telegram-bot-api');
-const https = require('https');
+const cron = require('node-cron');
+const { chromium } = require('playwright');
 
-// --- Налаштування бота ---
-const token = '8413003519:AAHLrlYJZPRFeSyslhQalYNS5Uz5qh8jZn8';
-const chatId = -1003348454247;
+const token = process.env.TG_TOKEN;
+const chatId = process.env.CHAT_ID || '-1003348454247'; // id твоєї групи
 
-const LOCATION = 'смт Чабани, Покровська 30-Б, черга 2.2';
-const DTEK_URL = 'https://www.dtek-krem.com.ua/ua/shutdowns';
-
-// --- HTTP запит ---
-
-function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => resolve(data));
-      })
-      .on('error', (err) => reject(err));
-  });
+if (!token) {
+  console.error('TG_TOKEN not set');
+  process.exit(1);
 }
-
-// --- Парсер таблиці з прикладу ---
-
-function parseTable(html) {
-  const tableStart = html.indexOf('<table>');
-  if (tableStart === -1) return [];
-
-  const tableEnd = html.indexOf('</table>', tableStart);
-  if (tableEnd === -1) return [];
-
-  const tableHtml = html.slice(tableStart, tableEnd + '</table>'.length);
-
-  const rowRegex =
-    /<tr>\s*<td[^>]*colspan="2"[^>]*>([^<]+)<\/td>\s*<td[^>]*class="([^"]+)"[^>]*>.*?<\/td>\s*<\/tr>/g;
-
-  const rows = [];
-  let match;
-  while ((match = rowRegex.exec(tableHtml)) !== null) {
-    const timeRange = match[1].trim(); // "00-01"
-    const cellClass = match[2].trim(); // "cell-scheduled", ...
-
-    const [fromH, toH] = timeRange.split('-');
-    const from = `${fromH.padStart(2, '0')}:00`;
-    const to = `${toH.padStart(2, '0')}:00`;
-
-    let status;
-    switch (cellClass) {
-      case 'cell-scheduled':
-        status = 'scheduled';
-        break;
-      case 'cell-first-half':
-        status = 'first-half';
-        break;
-      case 'cell-second-half':
-        status = 'second-half';
-        break;
-      case 'cell-non-scheduled':
-      default:
-        status = 'non-scheduled';
-    }
-
-    rows.push({ from, to, status });
-  }
-
-  return rows;
-}
-
-function timeToMinutes(t) {
-  const [h, m] = t.split(':').map((x) => parseInt(x, 10));
-  return h * 60 + m;
-}
-
-function describeStatus(rows) {
-  if (!rows.length) {
-    return {
-      nowText: 'дані по графіку не знайдені',
-      nextText: 'немає інформації про наступні відключення',
-    };
-  }
-
-  const now = new Date();
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
-
-  let current = null;
-  let next = null;
-
-  for (const r of rows) {
-    const fromM = timeToMinutes(r.from);
-    const toM = timeToMinutes(r.to);
-
-    if (nowMinutes >= fromM && nowMinutes < toM) {
-      current = r;
-    }
-
-    if (fromM > nowMinutes) {
-      if (!next || fromM < timeToMinutes(next.from)) {
-        next = r;
-      }
-    }
-  }
-
-  let nowText;
-
-  if (!current || current.status === 'non-scheduled') {
-    nowText = 'зараз за графіком світло МАЄ бути (поза вікнами відключень).';
-  } else if (current.status === 'scheduled') {
-    nowText = `зараз повна година під можливим/плановим відключенням: ${current.from}–${current.to}.`;
-  } else if (current.status === 'first-half') {
-    nowText = `зараз перші 30 хв без світла за графіком: ${current.from}–${current.to}.`;
-  } else if (current.status === 'second-half') {
-    nowText = `зараз другі 30 хв без світла за графіком: ${current.from}–${current.to}.`;
-  }
-
-  let nextText;
-  if (!next) {
-    nextText = 'подальших вікон відключень сьогодні в таблиці немає.';
-  } else {
-    let type;
-    if (next.status === 'non-scheduled') {
-      type = 'година без відключень';
-    } else if (next.status === 'scheduled') {
-      type = 'повна година можливого/планового відключення';
-    } else if (next.status === 'first-half') {
-      type = 'перші 30 хв без світла';
-    } else if (next.status === 'second-half') {
-      type = 'другі 30 хв без світла';
-    }
-    nextText = `найближче вікно за графіком: ${next.from}–${next.to} (${type}).`;
-  }
-
-  return { nowText, nextText };
-}
-
-async function getStatusText() {
-  try {
-    const html = await httpGet(DTEK_URL);
-    const rows = parseTable(html);
-    const { nowText, nextText } = describeStatus(rows);
-
-    const rangesText =
-      rows.length > 0
-        ? rows.map((r) => `${r.from}–${r.to} (${r.status})`).join(', ')
-        : 'немає';
-
-    return (
-      `Статус світла для ${LOCATION}:\n` +
-      `💡 ${nowText}\n` +
-      `📅 ${nextText}\n\n` +
-      `🔢 Вікна з таблиці: ${rangesText}\n\n` +
-      `Джерело: ${DTEK_URL}`
-    );
-  } catch (e) {
-    return (
-      'Статус світла:\n' +
-      '⚠️ Помилка при отриманні/розборі сторінки DTEK.\n' +
-      `Деталі: ${e.message}`
-    );
-  }
-}
-
-// --- Бот ---
 
 const bot = new TelegramBot(token, { polling: true });
 
-bot.sendMessage(
-  chatId,
-  '⚡️ Світло Плаза Квартал: бот запущений, читаємо графік з DTEK.'
-);
+let lastStatus = null;
 
-function normalizeCommand(text) {
-  if (!text) return '';
-  return text.trim().split('@')[0];
+const CONFIG = {
+  city: 'Чабани',
+  street: 'Покровська',
+  house: '30-Б',
+  group: '2.2'
+};
+
+// ---- скрапінг DTEK ----
+async function getDtekSchedule() {
+  try {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+
+    await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', {
+      waitUntil: 'networkidle'
+    });
+
+    // місто
+    await page.waitForSelector('#city', { timeout: 20000 });
+    await page.fill('#city', CONFIG.city);
+    await page.waitForTimeout(1000);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+
+    // вулиця
+    await page.waitForSelector('#street', { timeout: 20000 });
+    await page.fill('#street', CONFIG.street);
+    await page.waitForTimeout(1000);
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+
+    // будинок
+    await page.waitForSelector('#housenum', { timeout: 20000 });
+    await page.fill('#housenum', CONFIG.house);
+    await page.click('button[type="submit"]');
+
+    // чекаємо таблицю з графіком
+    await page.waitForSelector('table tbody tr', { timeout: 20000 });
+
+    const schedule = await page.$$eval('table tbody tr', rows =>
+      rows.map(row => {
+        const tds = Array.from(row.querySelectorAll('td'));
+        if (tds.length < 2) return null;
+
+        const timeText = (tds[0].textContent || '').trim(); // типу "18:00-19:00"
+        const cls = tds[1].className || '';
+
+        let status = 'ON';
+        if (cls.includes('cell-scheduled') || cls.includes('cell-off')) {
+          status = 'OFF';
+        } else if (cls.includes('cell-possible')) {
+          status = 'MAYBE';
+        }
+
+        return { time: timeText, status };
+      }).filter(Boolean)
+    );
+
+    await browser.close();
+    return schedule;
+  } catch (err) {
+    console.error('DTEK parse error:', err);
+    return null;
+  }
 }
 
-bot.on('message', async (msg) => {
-  if (!msg.text) return;
-  const cmd = normalizeCommand(msg.text);
+// ---- логіка статусу ----
+function getCurrentStatus(schedule) {
+  if (!schedule || schedule.length === 0) return 'unknown';
 
-  if (cmd === '/ping') {
-    bot.sendMessage(chatId, 'pong');
-    return;
+  const now = new Date();
+  const minutes = now.getMinutes();
+  const hourStr = now.getHours().toString().padStart(2, '0');
+  const current = `${hourStr}:${minutes < 30 ? '00' : '30'}`; // грубо 30-хвилинні слоти
+
+  const slot = schedule.find(s => s.time.startsWith(current));
+  if (!slot) return 'unknown';
+
+  if (slot.status === 'OFF') return 'немає світла';
+  if (slot.status === 'MAYBE') return 'можливе відключення';
+  return 'є світло';
+}
+
+function formatSchedule(schedule) {
+  if (!schedule || schedule.length === 0) return 'немає даних по графіку';
+  const lines = schedule.map(s => `${s.time} — ${s.status}`);
+  return lines.join('\n');
+}
+
+// ---- команда /status ----
+bot.onText(/\/status(@[\w_]+)?/, async msg => {
+  const chat = msg.chat.id;
+  bot.sendMessage(chat, '⏳ Оновлюю дані ДТЕК...');
+
+  const schedule = await getDtekSchedule();
+  const current = getCurrentStatus(schedule);
+
+  let text = `🔌 Статус по Чабани, вул. ${CONFIG.street} ${CONFIG.house} (група ${CONFIG.group}):\n`;
+  text += `Зараз: *${current.toUpperCase()}*\n\n`;
+
+  if (schedule) {
+    const nextOff = schedule.find(s => s.status === 'OFF');
+    if (nextOff) text += `⏰ Найближче відключення: ${nextOff.time}\n\n`;
+    text += 'Графік на сьогодні:\n';
+    text += '``````';
+  } else {
+    text += 'Не вдалося отримати графік з сайту DTEK.';
   }
 
-  if (cmd === '/start') {
-    bot.sendMessage(
-      chatId,
-      'Бот Світло Плаза Квартал працює. Використай /status для поточного статусу світла.'
-    );
-    return;
-  }
+  bot.sendMessage(chat, text, { parse_mode: 'Markdown' });
+});
 
-  if (cmd === '/status') {
-    const text = await getStatusText();
-    bot.sendMessage(chatId, text);
-    return;
+// ---- авто-сповіщення кожні 10 хв ----
+cron.schedule('*/10 * * * *', async () => {
+  const schedule = await getDtekSchedule();
+  const current = getCurrentStatus(schedule);
+
+  if (current === 'unknown') return;
+
+  if (current !== lastStatus) {
+    lastStatus = current;
+    const now = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+    let msg;
+
+    if (current === 'немає світла') {
+      msg = `⚫️ Світло *зникло* о ${now}`;
+    } else if (current === 'є світло') {
+      msg = `🟢 Світло *зʼявилось* о ${now}`;
+    } else {
+      msg = `🟡 Можливе відключення світла (статус DTEK) о ${now}`;
+    }
+
+    bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
   }
 });
+
+console.log('DTEK light bot started');
