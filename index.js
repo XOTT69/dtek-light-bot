@@ -7,7 +7,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const PORT = process.env.PORT || 3000;
 
-// твоя група
+// твоя TG-група
 const GROUP_CHAT_ID = -1003348454247;
 
 if (!BOT_TOKEN || !WEBHOOK_DOMAIN) {
@@ -15,6 +15,7 @@ if (!BOT_TOKEN || !WEBHOOK_DOMAIN) {
   process.exit(1);
 }
 
+// сторінка Чабанів
 const ALERTS_URL =
   'https://alerts.org.ua/kyivska-oblast/chabanivska-hromada/chabani/';
 
@@ -47,7 +48,7 @@ function getCurrentAndNext(periods, date = new Date()) {
   return { current, next };
 }
 
-// ===== парсер alerts.org.ua =====
+// ===== парсер alerts.org.ua: тільки улюблена група =====
 async function fetchAlertsSchedule() {
   const res = await axios.get(ALERTS_URL, {
     headers: {
@@ -62,18 +63,22 @@ async function fetchAlertsSchedule() {
   const $ = cheerio.load(html);
 
   const periods = [];
-  $('.period > div').each((_, el) => {
-    const start = $(el).attr('data-start');
-    const end = $(el).attr('data-end');
-    const statusText = $(el).find('b').text().trim();
-    let status = 'unknown';
-    if (statusText === 'ON') status = 'on';
-    if (statusText === 'OFF') status = 'off';
 
-    if (start && end) {
-      periods.push({ start, end, status });
+  // Беремо тільки блок із сердечком (fav_.fav-hm) і його .period
+  $('#shedule > div.col-6.col-md-3.js-group.fav_.fav-hm > div .period > div').each(
+    (_, el) => {
+      const start = $(el).attr('data-start');
+      const end = $(el).attr('data-end');
+      const statusText = $(el).find('b').text().trim();
+      let status = 'unknown';
+      if (statusText === 'ON') status = 'on';
+      if (statusText === 'OFF') status = 'off';
+
+      if (start && end) {
+        periods.push({ start, end, status });
+      }
     }
-  });
+  );
 
   return periods;
 }
@@ -131,7 +136,7 @@ async function buildStatusText() {
   return msg;
 }
 
-// ===== тільки твоя група =====
+// ===== тільки твоя TG-група =====
 function isOurGroup(ctx) {
   return (
     (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') &&
