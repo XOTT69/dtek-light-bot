@@ -64,7 +64,7 @@ async function fetchAlertsSchedule() {
 
   const periods = [];
 
-  // Беремо тільки блок із сердечком (fav_.fav-hm) і його .period
+  // блок з сердечком (fav_.fav-hm) -> тільки його .period
   $('#shedule > div.col-6.col-md-3.js-group.fav_.fav-hm > div .period > div').each(
     (_, el) => {
       const start = $(el).attr('data-start');
@@ -100,37 +100,62 @@ function normalizeToday(periods) {
   return today;
 }
 
-// текст повідомлення
+// текст повідомлення + підрахунок OFF
 async function buildStatusText() {
   const periodsRaw = await fetchAlertsSchedule();
   const periods = normalizeToday(periodsRaw);
   const { current, next } = getCurrentAndNext(periods);
+  const last = periods[periods.length - 1];
+
+  // сумарний OFF за день
+  let offMinutes = 0;
+  for (const p of periods) {
+    if (p.status !== 'off') continue;
+    const from = toMins(p.start);
+    const to = toMins(p.end === '24:00' ? '23:59' : p.end);
+    offMinutes += to - from;
+  }
+  const offHours = (offMinutes / 60).toFixed(1);
+
+  const now = new Date();
+  const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(
+    now.getMinutes()
+  ).padStart(2, '0')}`;
 
   let msg = '';
 
+  // поточний стан
   if (current) {
     if (current.status === 'off') {
-      msg += `Зараз світла НЕМає (${current.start} - ${current.end}).\n`;
+      msg += `Зараз ${nowStr} світло відсутнє (${current.start} - ${current.end}).\n`;
     } else if (current.status === 'on') {
-      msg += `Зараз світло Є (${current.start} - ${current.end}).\n`;
+      msg += `Зараз ${nowStr} світло є (${current.start} - ${current.end}).\n`;
     } else {
-      msg += 'Зараз статус світла невідомий.\n';
+      msg += `Зараз ${nowStr} статус світла невідомий.\n`;
     }
   } else {
-    msg += 'Не вдалося визначити поточний інтервал.\n';
+    if (last && last.status === 'off') {
+      msg += `Зараз ${nowStr} світло відсутнє (останній інтервал дня ${last.start} - ${last.end} без світла).\n`;
+    } else {
+      msg += `Зараз ${nowStr} світло є (поза запланованими інтервалами).\n`;
+    }
   }
 
+  // наступна зміна
   if (next) {
     msg += `Наступна зміна о ${next.start}: буде ${
-      next.status === 'off' ? 'OFF' : 'ON'
+      next.status === 'off' ? 'світло відсутнє' : 'світло є'
     }.\n\n`;
   } else {
-    msg += '\nДалі на сьогодні змін не заплановано.\n\n';
+    msg += 'Далі на сьогодні змін не заплановано.\n\n';
   }
+
+  msg += `Сьогодні планово без світла було ${offHours} год.\n\n`;
 
   msg += 'Графік на сьогодні:\n';
   for (const p of periods) {
-    msg += `${p.start} - ${p.end}: ${p.status === 'off' ? 'OFF' : 'ON'}\n`;
+    const label = p.status === 'off' ? 'світло відсутнє' : 'світло є';
+    msg += `${p.start} - ${p.end}: ${label}\n`;
   }
 
   return msg;
