@@ -1,141 +1,161 @@
 const TelegramBot = require('node-telegram-bot-api');
 const cron = require('node-cron');
-const { chromium } = require('playwright');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-// Твій токен і chat_id
+// ⚠️ ВСТАВ СЮДИ СВІЙ ТОКЕН
 const token = '8413003519:AAHLrlYJZPRFeSyslhQalYNS5Uz5qh8jZn8';
-const chatId = -1003348454247; // група
+const chatId = -1003348454247; // твоя група
 
 const bot = new TelegramBot(token, { polling: true });
 
 let lastStatus = null;
 
-const CONFIG = {
-  city: 'Чабани',
-  street: 'Покровська',
-  house: '30-Б',
-  group: '2.2'
-};
+// ----------------------------------------------------
+// Парсер svitlo.live для "Черга 2.2" Київська область
+// ----------------------------------------------------
 
-async function getDtekSchedule() {
-  try {
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+const SVITLO_URL = 'https://svitlo.live/kiivska-oblast';
 
-    await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', {
-      waitUntil: 'networkidle'
-    });
+async function fetchScheduleFromSvitlo() {
+  const res = await axios.get(SVITLO_URL, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    },
+    timeout: 15000
+  });
 
-    await page.waitForSelector('#city', { timeout: 20000 });
-    await page.fill('#city', CONFIG.city);
-    await page.waitForTimeout(1000);
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
+  const html = res.data;
+  const $ = cheerio.load(html);
 
-    await page.waitForSelector('#street', { timeout: 20000 });
-    await page.fill('#street', CONFIG.street);
-    await page.waitForTimeout(1000);
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
+  // Шукаємо рядок таблиці, як ти дав:
+  // <tr><td>Черга 2.2</td><td class="on">●</td> ... </tr>
+  const row = $('tr')
+    .filter((i, el) => $(el).find('td').first().text().trim() === 'Черга 2.2')
+    .first();
 
-    await page.waitForSelector('#housenum', { timeout: 20000 });
-    await page.fill('#housenum', CONFIG.house);
-    await page.click('button[type="submit"]');
-
-    await page.waitForSelector('table tbody tr', { timeout: 20000 });
-
-    const schedule = await page.$$eval('table tbody tr', rows =>
-      rows.map(row => {
-        const tds = Array.from(row.querySelectorAll('td'));
-        if (tds.length < 2) return null;
-
-        const timeText = (tds[0].textContent || '').trim();
-        const cls = tds[1].className || '';
-
-        let status = 'ON';
-        if (cls.includes('cell-scheduled') || cls.includes('cell-off')) {
-          status = 'OFF';
-        } else if (cls.includes('cell-possible')) {
-          status = 'MAYBE';
-        }
-
-        return { time: timeText, status };
-      }).filter(Boolean)
-    );
-
-    await browser.close();
-    return schedule;
-  } catch (err) {
-    console.error('DTEK parse error:', err);
-    return null;
+  if (!row || row.length === 0) {
+    throw new Error('Не знайшов рядок "Черга 2.2" на svitlo.live');
   }
+
+  const tds = row.find('td').toArray().slice(1); // пропускаємо першу комірку з текстом "Черга 2.2"
+
+  // години 00..23 у порядку
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+
+  const schedule = hours.map((h, idx) => {
+    const td = tds[idx];
+    if (!td) return { hour: h, status: 'unknown' };
+
+    const cls = ($(td).attr('class') || '').trim();
+
+    // клас → статус
+    let status = 'unknown';
+    if (cls.includes('on')) status = 'on';
+    else if (cls.includes('off')) status = 'off';
+    else if (cls.includes('f4') || cls.includes('f5')) status = 'maybe'; // з твого прикладу % з f4/f5
+
+    return { hour: h, status };
+  });
+
+  return schedule;
 }
 
+// Поточний статус по часу
 function getCurrentStatus(schedule) {
   if (!schedule || schedule.length === 0) return 'unknown';
 
   const now = new Date();
-  const minutes = now.getMinutes();
-  const hourStr = now.getHours().toString().padStart(2, '0');
-  const current = `${hourStr}:${minutes < 30 ? '00' : '30'}`;
+  const hour = now.getHours();
 
-  const slot = schedule.find(s => s.time.startsWith(current));
+  const slot = schedule.find(s => s.hour === hour);
   if (!slot) return 'unknown';
 
-  if (slot.status === 'OFF') return 'немає світла';
-  if (slot.status === 'MAYBE') return 'можливе відключення';
-  return 'є світло';
+  if (slot.status === 'on') return 'є світло';
+  if (slot.status === 'off') return 'немає світла';
+  if (slot.status === 'maybe') return 'можливе відключення';
+  return 'unknown';
 }
 
 function formatSchedule(schedule) {
   if (!schedule || schedule.length === 0) return 'немає даних по графіку';
-  const lines = schedule.map(s => `${s.time} — ${s.status}`);
-  return lines.join('\n');
+
+  return schedule
+    .map(s => {
+      const h = s.hour.toString().padStart(2, '0') + ':00';
+      let label = 'невідомо';
+      if (s.status === 'on') label = 'світло є';
+      else if (s.status === 'off') label = 'світла немає';
+      else if (s.status === 'maybe') label = 'можливе відключення';
+      return `${h} — ${label}`;
+    })
+    .join('\n');
 }
+
+// ---------------------------------------
+// Команда /status
+// ---------------------------------------
 
 bot.onText(/\/status(@[\w_]+)?/, async msg => {
   const chat = msg.chat.id;
-  bot.sendMessage(chat, '⏳ Оновлюю дані ДТЕК...');
+  try {
+    await bot.sendMessage(chat, '⏳ Оновлюю графік з svitlo.live...');
 
-  const schedule = await getDtekSchedule();
-  const current = getCurrentStatus(schedule);
+    const schedule = await fetchScheduleFromSvitlo();
+    const current = getCurrentStatus(schedule);
 
-  let text = `🔌 Статус по Чабани, вул. ${CONFIG.street} ${CONFIG.house} (група ${CONFIG.group}):\n`;
-  text += `Зараз: *${current.toUpperCase()}*\n\n`;
+    let text =
+      '🔌 Статус по Київська область, черга 2.2 (svitlo.live):\n' +
+      `Зараз: *${current.toUpperCase()}*\n\n` +
+      'Графік на сьогодні:\n' +
+      '```
+      formatSchedule(schedule) +
+      '\n```';
 
-  if (schedule) {
-    const nextOff = schedule.find(s => s.status === 'OFF');
-    if (nextOff) text += `⏰ Найближче відключення: ${nextOff.time}\n\n`;
-    text += 'Графік на сьогодні:\n';
-    text += '``````';
-  } else {
-    text += 'Не вдалося отримати графік з сайту DTEK.';
+    await bot.sendMessage(chat, text, { parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error('STATUS error:', e);
+    await bot.sendMessage(
+      chat,
+      '⚠️ Не вдалося отримати графік з svitlo.live.'
+    );
   }
-
-  bot.sendMessage(chat, text, { parse_mode: 'Markdown' });
 });
+
+// ---------------------------------------
+// Автосповіщення кожні 10 хв
+// ---------------------------------------
 
 cron.schedule('*/10 * * * *', async () => {
-  const schedule = await getDtekSchedule();
-  const current = getCurrentStatus(schedule);
+  try {
+    const schedule = await fetchScheduleFromSvitlo();
+    const current = getCurrentStatus(schedule);
+    if (current === 'unknown') return;
 
-  if (current === 'unknown') return;
-  if (current !== lastStatus) {
-    lastStatus = current;
-    const now = new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' });
+    if (current !== lastStatus) {
+      lastStatus = current;
 
-    let msg;
-    if (current === 'немає світла') {
-      msg = `⚫️ Світло *зникло* о ${now}`;
-    } else if (current === 'є світло') {
-      msg = `🟢 Світло *зʼявилось* о ${now}`;
-    } else {
-      msg = `🟡 Можливе відключення світла (статус DTEK) о ${now}`;
+      const now = new Date().toLocaleTimeString('uk-UA', {
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      let msg;
+      if (current === 'немає світла') {
+        msg = `⚫️ Світло *за графіком немає* о ${now} (черга 2.2, svitlo.live)`;
+      } else if (current === 'є світло') {
+        msg = `🟢 Світло *за графіком є* о ${now} (черга 2.2, svitlo.live)`;
+      } else {
+        msg = `🟡 *Можливе відключення* за графіком о ${now} (черга 2.2, svitlo.live)`;
+      }
+
+      await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
     }
-
-    bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error('CRON error:', e);
   }
 });
 
-console.log('DTEK light bot started');
-
+console.log('Svitlo.live 2.2 bot started');
