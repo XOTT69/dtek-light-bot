@@ -7,14 +7,47 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 const PORT = process.env.PORT || 3000;
 
+// твоя група
+const GROUP_CHAT_ID = -1003348454247;
+
 if (!BOT_TOKEN || !WEBHOOK_DOMAIN) {
   console.error('ENV BOT_TOKEN or WEBHOOK_DOMAIN is missing');
   process.exit(1);
 }
 
-const ALERTS_URL = 'https://alerts.org.ua/kyivska-oblast/chabanivska-hromada/chabani/';
+const ALERTS_URL =
+  'https://alerts.org.ua/kyivska-oblast/chabanivska-hromada/chabani/';
 
-// ------------- парсер alerts.org.ua -------------
+const bot = new Telegraf(BOT_TOKEN);
+
+// ===== утиліти часу =====
+function toMins(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function getCurrentAndNext(periods, date = new Date()) {
+  const nowMins = date.getHours() * 60 + date.getMinutes();
+  let current = null;
+  let next = null;
+
+  for (const p of periods) {
+    const from = toMins(p.start);
+    const to = toMins(p.end === '24:00' ? '23:59' : p.end);
+
+    if (nowMins >= from && nowMins <= to) {
+      current = p;
+    } else if (from > nowMins) {
+      if (!next || from < toMins(next.start)) {
+        next = p;
+      }
+    }
+  }
+
+  return { current, next };
+}
+
+// ===== парсер alerts.org.ua =====
 async function fetchAlertsSchedule() {
   const res = await axios.get(ALERTS_URL, {
     headers: {
@@ -45,92 +78,93 @@ async function fetchAlertsSchedule() {
   return periods;
 }
 
-function getCurrentStatus(periods, date = new Date()) {
-  const mins = date.getHours() * 60 + date.getMinutes();
+// один день без дублів
+function normalizeToday(periods) {
+  const today = [];
+  const seen = new Set();
 
-  const toMins = (hhmm) => {
-    const [h, m] = hhmm.split(':').map(Number);
-    return h * 60 + m;
-  };
-
-  let current = { status: 'unknown', until: null };
   for (const p of periods) {
-    const from = toMins(p.start);
-    const to = toMins(p.end === '24:00' ? '23:59' : p.end);
-
-    if (mins >= from && mins <= to) {
-      current.status = p.status;
-      current.until = p.end;
-      break;
-    }
+    const key = `${p.start}-${p.end}-${p.status}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    today.push(p);
+    if (today.length >= 6) break;
   }
 
-  return current;
+  today.sort((a, b) => toMins(a.start) - toMins(b.start));
+  return today;
 }
 
-// ------------- бот -------------
-const bot = new Telegraf(BOT_TOKEN);
+// текст повідомлення
+async function buildStatusText() {
+  const periodsRaw = await fetchAlertsSchedule();
+  const periods = normalizeToday(periodsRaw);
+  const { current, next } = getCurrentAndNext(periods);
+
+  let msg = '';
+
+  if (current) {
+    if (current.status === 'off') {
+      msg += `Зараз світла НЕМає (${current.start} - ${current.end}).\n`;
+    } else if (current.status === 'on') {
+      msg += `Зараз світло Є (${current.start} - ${current.end}).\n`;
+    } else {
+      msg += 'Зараз статус світла невідомий.\n';
+    }
+  } else {
+    msg += 'Не вдалося визначити поточний інтервал.\n';
+  }
+
+  if (next) {
+    msg += `Наступна зміна о ${next.start}: буде ${
+      next.status === 'off' ? 'OFF' : 'ON'
+    }.\n\n`;
+  } else {
+    msg += '\nДалі на сьогодні змін не заплановано.\n\n';
+  }
+
+  msg += 'Графік на сьогодні:\n';
+  for (const p of periods) {
+    msg += `${p.start} - ${p.end}: ${p.status === 'off' ? 'OFF' : 'ON'}\n`;
+  }
+
+  return msg;
+}
+
+// ===== тільки твоя група =====
+function isOurGroup(ctx) {
+  return (
+    (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') &&
+    ctx.chat.id === GROUP_CHAT_ID
+  );
+}
 
 bot.start(async (ctx) => {
+  if (!isOurGroup(ctx)) return;
   try {
-    const periods = await fetchAlertsSchedule();
-    const current = getCurrentStatus(periods);
-
-    const text =
-      current.status === 'off'
-        ? `Зараз світла НЕМає. Наступна зміна о ${current.until}.`
-        : current.status === 'on'
-        ? `Зараз світло Є. Наступна зміна о ${current.until}.`
-        : 'Не вдалося визначити статус світла.';
-
-    await ctx.reply(text);
+    const msg = await buildStatusText();
+    await ctx.reply(msg);
   } catch (e) {
     console.error(e);
-    await ctx.reply('Сталася помилка при отриманні графіка.');
   }
 });
 
 bot.command('status', async (ctx) => {
+  if (!isOurGroup(ctx)) return;
   try {
-    const periods = await fetchAlertsSchedule();
-    const current = getCurrentStatus(periods);
-
-    let msg = 'Графік на сьогодні:\n';
-    for (const p of periods) {
-      msg += `${p.start} - ${p.end}: ${p.status === 'off' ? 'OFF' : 'ON'}\n`;
-    }
-
-    msg += '\n';
-    msg +=
-      current.status === 'off'
-        ? `Зараз світла НЕМає. Наступна зміна о ${current.until}.`
-        : current.status === 'on'
-        ? `Зараз світло Є. Наступна зміна о ${current.until}.`
-        : 'Не вдалося визначити поточний статус.';
-
+    const msg = await buildStatusText();
     await ctx.reply(msg);
   } catch (e) {
     console.error(e);
-    await ctx.reply('Сталася помилка при отриманні графіка.');
   }
 });
 
-// ------------- Express + webhook -------------
+// ===== HTTP + webhook =====
 const app = express();
 app.use(express.json());
 
 app.get('/', (_req, res) => {
   res.send('Bot is running');
-});
-
-app.get('/status', async (_req, res) => {
-  try {
-    const periods = await fetchAlertsSchedule();
-    res.json({ periods });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'failed to fetch schedule' });
-  }
 });
 
 app.post('/tg-webhook', (req, res) => {
@@ -147,4 +181,3 @@ app.listen(PORT, async () => {
     console.error('Failed to set webhook', e);
   }
 });
-
