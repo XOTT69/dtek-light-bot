@@ -28,15 +28,14 @@ async function fetchScheduleFromSvitlo() {
   const html = res.data;
   const $ = cheerio.load(html);
 
-  const row = $('tr')
-    .filter((i, el) => $(el).find('td').first().text().trim() === 'Черга 2.2')
-    .first();
-
-  if (!row || row.length === 0) {
-    throw new Error('Не знайшов рядок "Черга 2.2" на svitlo.live');
+  // таблиця для черги 2.2
+  const table = $('#chergra2\\.2 > div:nth-child(1) > table');
+  if (!table || table.length === 0) {
+    throw new Error('Не знайшов таблицю для черги 2.2 на svitlo.live');
   }
 
-  const tds = row.find('td').toArray().slice(1);
+  // у таблиці 24 комірки по годинах (00–23)
+  const tds = table.find('tbody tr td').toArray();
   const hours = Array.from({ length: 24 }, (_, i) => i);
 
   const schedule = hours.map((h, idx) => {
