@@ -48,6 +48,14 @@ function getCurrentAndNext(periods, date = new Date()) {
   return { current, next };
 }
 
+// дає ключ дати типу '2025-12-19'
+function getDateKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 // ===== парсер alerts.org.ua: тільки улюблена група =====
 async function fetchAlertsSchedule() {
   const res = await axios.get(ALERTS_URL, {
@@ -105,7 +113,12 @@ async function buildStatusText() {
   const periodsRaw = await fetchAlertsSchedule();
   const periods = normalizeToday(periodsRaw);
   const { current, next } = getCurrentAndNext(periods);
-  const last = periods[periods.length - 1];
+  const last = periods[periods.length - 1] || null;
+
+  const now = new Date();
+  const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(
+    now.getMinutes()
+  ).padStart(2, '0')}`;
 
   // сумарний OFF за день
   let offMinutes = 0;
@@ -117,15 +130,12 @@ async function buildStatusText() {
   }
   const offHours = (offMinutes / 60).toFixed(1);
 
-  const now = new Date();
-  const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(
-    now.getMinutes()
-  ).padStart(2, '0')}`;
-
   let msg = '';
 
   // поточний стан
-  if (current) {
+  if (periods.length === 0) {
+    msg += `Зараз ${nowStr} стан світла невідомий, розклад не знайдено.\n\n`;
+  } else if (current) {
     if (current.status === 'off') {
       msg += `Зараз ${nowStr} світло відсутнє (${current.start} - ${current.end}).\n`;
     } else if (current.status === 'on') {
@@ -136,8 +146,10 @@ async function buildStatusText() {
   } else {
     if (last && last.status === 'off') {
       msg += `Зараз ${nowStr} світло відсутнє (останній інтервал дня ${last.start} - ${last.end} без світла).\n`;
+    } else if (last && last.status === 'on') {
+      msg += `Зараз ${nowStr} світло є (останній інтервал дня ${last.start} - ${last.end} зі світлом).\n`;
     } else {
-      msg += `Зараз ${nowStr} світло є (поза запланованими інтервалами).\n`;
+      msg += `Зараз ${nowStr} статус світла невідомий.\n`;
     }
   }
 
@@ -150,12 +162,21 @@ async function buildStatusText() {
     msg += 'Далі на сьогодні змін не заплановано.\n\n';
   }
 
-  msg += `Сьогодні планово без світла було ${offHours} год.\n\n`;
+  if (periods.length > 0) {
+    msg += `Сьогодні планово без світла було ${offHours} год.\n\n`;
+  }
 
   msg += 'Графік на сьогодні:\n';
-  for (const p of periods) {
-    const label = p.status === 'off' ? 'світло відсутнє' : 'світло є';
-    msg += `${p.start} - ${p.end}: ${label}\n`;
+  if (periods.length === 0 && last) {
+    const label = last.status === 'off' ? 'світло відсутнє' : 'світло є';
+    msg += `${last.start} - ${last.end}: ${label} (останній відомий інтервал)\n`;
+  } else if (periods.length === 0) {
+    msg += 'немає даних.\n';
+  } else {
+    for (const p of periods) {
+      const label = p.status === 'off' ? 'світло відсутнє' : 'світло є';
+      msg += `${p.start} - ${p.end}: ${label}\n`;
+    }
   }
 
   return msg;
@@ -188,6 +209,75 @@ bot.command('status', async (ctx) => {
     console.error(e);
   }
 });
+
+// ===== авто-сповіщення =====
+
+// останній відомий інтервал для авто-пінгів
+let lastIntervalKey = null;
+
+// остання відома дата та графік для детекту змін
+let lastDateKey = null;
+let lastScheduleJson = null;
+
+// раз на хвилину перевіряємо зміну інтервалу
+setInterval(async () => {
+  try {
+    const periodsRaw = await fetchAlertsSchedule();
+    const periods = normalizeToday(periodsRaw);
+    if (periods.length === 0) return;
+
+    const { current } = getCurrentAndNext(periods);
+    if (!current) return;
+
+    const key = `${getDateKey()}_${current.start}-${current.end}-${current.status}`;
+    if (key === lastIntervalKey) return;
+    lastIntervalKey = key;
+
+    const labelNow = current.status === 'off' ? 'світло відсутнє' : 'світло є';
+    const text = `Згідно з графіком з ${current.start} до ${current.end} ${labelNow}.`;
+
+    await bot.telegram.sendMessage(GROUP_CHAT_ID, text);
+  } catch (e) {
+    console.error('Interval check error', e);
+  }
+}, 60 * 1000);
+
+// раз на 5 хвилин перевіряємо нову дату/зміну графіка
+setInterval(async () => {
+  try {
+    const periodsRaw = await fetchAlertsSchedule();
+    const periods = normalizeToday(periodsRaw);
+    const dateKey = getDateKey();
+    const scheduleJson = JSON.stringify(periods);
+
+    if (lastDateKey === null && periods.length > 0) {
+      // перший запуск – просто ініціалізуємо
+      lastDateKey = dateKey;
+      lastScheduleJson = scheduleJson;
+      return;
+    }
+
+    if (dateKey !== lastDateKey) {
+      lastDateKey = dateKey;
+      lastScheduleJson = scheduleJson;
+      await bot.telegram.sendMessage(
+        GROUP_CHAT_ID,
+        `Оновлено графік на сьогодні (${dateKey}).`
+      );
+      return;
+    }
+
+    if (scheduleJson !== lastScheduleJson) {
+      lastScheduleJson = scheduleJson;
+      await bot.telegram.sendMessage(
+        GROUP_CHAT_ID,
+        'Графік на сьогодні було змінено, оновлено інтервали.'
+      );
+    }
+  } catch (e) {
+    console.error('Schedule change check error', e);
+  }
+}, 5 * 60 * 1000);
 
 // ===== HTTP + webhook =====
 const app = express();
