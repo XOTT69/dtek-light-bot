@@ -95,9 +95,9 @@ bot.onText(/\/status(@[\w_]+)?/, async msg => {
       '🔌 Статус по Київська область, черга 2.2 (svitlo.live):\n' +
       `Зараз: *${current.toUpperCase()}*\n\n` +
       'Графік на сьогодні:\n' +
-      '```
+      '```text\n' +
       formatSchedule(schedule) +
-      '\n```';
+      '\n```
 
     await bot.sendMessage(chat, text, { parse_mode: 'Markdown' });
   } catch (e) {
