@@ -1,22 +1,10 @@
-const TelegramBot = require('node-telegram-bot-api');
-const cron = require('node-cron');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-// Твій токен і група
-const token = '8413003519:AAHLrlYJZPRFeSyslhQalYNS5Uz5qh8jZn8';
-const chatId = -1003348454247;
+const ALERTS_URL = 'https://alerts.org.ua/kyivska-oblast/chabanivska-hromada/chabani/';
 
-const bot = new TelegramBot(token, { polling: true });
-
-let lastStatus = null;
-
-const SVITLO_URL = 'https://svitlo.live/kiivska-oblast';
-
-// ----------- парсер svitlo.live для Черга 2.2 -----------
-
-async function fetchScheduleFromSvitlo() {
-  const res = await axios.get(SVITLO_URL, {
+async function fetchAlertsSchedule() {
+  const res = await axios.get(ALERTS_URL, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -28,119 +16,19 @@ async function fetchScheduleFromSvitlo() {
   const html = res.data;
   const $ = cheerio.load(html);
 
-  // таблиця для черги 2.2
-  const table = $('#chergra2\\.2 > div:nth-child(1) > table');
-  if (!table || table.length === 0) {
-    throw new Error('Не знайшов таблицю для черги 2.2 на svitlo.live');
-  }
-
-  // у таблиці 24 комірки по годинах (00–23)
-  const tds = table.find('tbody tr td').toArray();
-  const hours = Array.from({ length: 24 }, (_, i) => i);
-
-  const schedule = hours.map((h, idx) => {
-    const td = tds[idx];
-    if (!td) return { hour: h, status: 'unknown' };
-
-    const cls = ($(td).attr('class') || '').trim();
-
+  const periods = [];
+  $('.period > div').each((_, el) => {
+    const start = $(el).attr('data-start');
+    const end = $(el).attr('data-end');
+    const statusText = $(el).find('b').text().trim();
     let status = 'unknown';
-    if (cls.includes('on')) status = 'on';
-    else if (cls.includes('off')) status = 'off';
-    else if (cls.includes('f4') || cls.includes('f5')) status = 'maybe';
+    if (statusText === 'ON') status = 'on';
+    if (statusText === 'OFF') status = 'off';
 
-    return { hour: h, status };
+    if (start && end) {
+      periods.push({ start, end, status });
+    }
   });
 
-  return schedule;
+  return periods;
 }
-
-function getCurrentStatus(schedule) {
-  if (!schedule || schedule.length === 0) return 'unknown';
-
-  const now = new Date();
-  const hour = now.getHours();
-
-  const slot = schedule.find(s => s.hour === hour);
-  if (!slot) return 'unknown';
-
-  if (slot.status === 'on') return 'є світло';
-  if (slot.status === 'off') return 'немає світла';
-  if (slot.status === 'maybe') return 'можливе відключення';
-  return 'unknown';
-}
-
-function formatSchedule(schedule) {
-  if (!schedule || schedule.length === 0) return 'немає даних по графіку';
-
-  return schedule
-    .map(s => {
-      const h = s.hour.toString().padStart(2, '0') + ':00';
-      let label = 'невідомо';
-      if (s.status === 'on') label = 'світло є';
-      else if (s.status === 'off') label = 'світла немає';
-      else if (s.status === 'maybe') label = 'можливе відключення';
-      return `${h} — ${label}`;
-    })
-    .join('\n');
-}
-
-// ---------------- команда /status ----------------
-
-bot.onText(/\/status(@[\w_]+)?/, async msg => {
-  const chat = msg.chat.id;
-  try {
-    await bot.sendMessage(chat, 'Оновлюю графік з svitlo.live...');
-
-    const schedule = await fetchScheduleFromSvitlo();
-    const current = getCurrentStatus(schedule);
-
-    const text =
-      'Статус по Київська область, черга 2.2 (svitlo.live):\n' +
-      `Зараз: ${current.toUpperCase()}\n\n` +
-      'Графік на сьогодні:\n' +
-      formatSchedule(schedule);
-
-    await bot.sendMessage(chat, text);
-  } catch (e) {
-    console.error('STATUS error:', e);
-    await bot.sendMessage(
-      chat,
-      'Не вдалося отримати графік з svitlo.live.'
-    );
-  }
-});
-
-// ------------- авто-сповіщення кожні 10 хв -------------
-
-cron.schedule('*/10 * * * *', async () => {
-  try {
-    const schedule = await fetchScheduleFromSvitlo();
-    const current = getCurrentStatus(schedule);
-    if (current === 'unknown') return;
-
-    if (current !== lastStatus) {
-      lastStatus = current;
-
-      const now = new Date().toLocaleTimeString('uk-UA', {
-        hour: '2-digit',
-        minute: '2-digit'
-      });
-
-      let msg;
-      if (current === 'немає світла') {
-        msg = `Світло за графіком немає о ${now} (черга 2.2, svitlo.live)`;
-      } else if (current === 'є світло') {
-        msg = `Світло за графіком є о ${now} (черга 2.2, svitlo.live)`;
-      } else {
-        msg = `Можливе відключення за графіком о ${now} (черга 2.2, svitlo.live)`;
-      }
-
-      await bot.sendMessage(chatId, msg);
-    }
-  } catch (e) {
-    console.error('CRON error:', e);
-  }
-});
-
-console.log('Svitlo.live 2.2 bot started');
