@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const axios = require('axios');
 const cheerio = require('cheerio');
 
+// Твій токен і група
 const token = '8413003519:AAHLrlYJZPRFeSyslhQalYNS5Uz5qh8jZn8';
 const chatId = -1003348454247;
 
@@ -11,6 +12,8 @@ const bot = new TelegramBot(token, { polling: true });
 let lastStatus = null;
 
 const SVITLO_URL = 'https://svitlo.live/kiivska-oblast';
+
+// ----------- парсер svitlo.live для Черга 2.2 -----------
 
 async function fetchScheduleFromSvitlo() {
   const res = await axios.get(SVITLO_URL, {
@@ -83,31 +86,33 @@ function formatSchedule(schedule) {
     .join('\n');
 }
 
+// ---------------- команда /status ----------------
+
 bot.onText(/\/status(@[\w_]+)?/, async msg => {
   const chat = msg.chat.id;
   try {
-    await bot.sendMessage(chat, '⏳ Оновлюю графік з svitlo.live...');
+    await bot.sendMessage(chat, 'Оновлюю графік з svitlo.live...');
 
     const schedule = await fetchScheduleFromSvitlo();
     const current = getCurrentStatus(schedule);
 
-    let text =
-      '🔌 Статус по Київська область, черга 2.2 (svitlo.live):\n' +
-      `Зараз: *${current.toUpperCase()}*\n\n` +
+    const text =
+      'Статус по Київська область, черга 2.2 (svitlo.live):\n' +
+      `Зараз: ${current.toUpperCase()}\n\n` +
       'Графік на сьогодні:\n' +
-      '```text\n' +
-      formatSchedule(schedule) +
-      '\n```
+      formatSchedule(schedule);
 
-    await bot.sendMessage(chat, text, { parse_mode: 'Markdown' });
+    await bot.sendMessage(chat, text);
   } catch (e) {
     console.error('STATUS error:', e);
     await bot.sendMessage(
       chat,
-      '⚠️ Не вдалося отримати графік з svitlo.live.'
+      'Не вдалося отримати графік з svitlo.live.'
     );
   }
 });
+
+// ------------- авто-сповіщення кожні 10 хв -------------
 
 cron.schedule('*/10 * * * *', async () => {
   try {
@@ -125,14 +130,14 @@ cron.schedule('*/10 * * * *', async () => {
 
       let msg;
       if (current === 'немає світла') {
-        msg = `⚫️ Світло *за графіком немає* о ${now} (черга 2.2, svitlo.live)`;
+        msg = `Світло за графіком немає о ${now} (черга 2.2, svitlo.live)`;
       } else if (current === 'є світло') {
-        msg = `🟢 Світло *за графіком є* о ${now} (черга 2.2, svitlo.live)`;
+        msg = `Світло за графіком є о ${now} (черга 2.2, svitlo.live)`;
       } else {
-        msg = `🟡 *Можливе відключення* за графіком о ${now} (черга 2.2, svitlo.live)`;
+        msg = `Можливе відключення за графіком о ${now} (черга 2.2, svitlo.live)`;
       }
 
-      await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, msg);
     }
   } catch (e) {
     console.error('CRON error:', e);
