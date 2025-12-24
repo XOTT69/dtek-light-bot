@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 
-const token = process.env.TG_TOKEN || '8413003519:AAHLrlYJZPRFeSyslhQalYNS5Uz5qh8jZn8';
-const GROUP_ID = -1003348454247; // chat_id твоєї групи
+const token = process.env.TG_TOKEN;           // тільки з env
+const GROUP_ID = -1003348454247;              // твоя група
 
 const bot = new TelegramBot(token, { polling: true });
 
@@ -20,4 +20,3 @@ bot.on('message', (msg) => {
 });
 
 console.log('Bot started');
-
